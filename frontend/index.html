@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>chunk-upload</title>
+</head>
+<body>
+    <input type="file" id="input">
+    <button id="submit">Upload File</button>
+
+    <script type="module" src="./worker.js"></script>
+    <script type="module">
+        const input = document.querySelector('#input')
+        const button = document.querySelector('button#submit')
+
+        input.onchange = (e) => {
+            file = e.target.files[0]
+        }
+        button.onclick = () => {
+            uploadChunkFile(file)
+                .then((chunkList) => {
+                    console.log('chunkList', chunkList)
+                    chunk_count = chunkList.length
+                    for (let i = 0; i < chunkList.length; i++) {
+                        uploadArr.push(createUpload(chunkList[i], file))
+                    }
+                }).then(() => {
+                    Promise.all(uploadArr)
+                })
+        }
+
+        let file = null,
+            timestamp = new Date(),
+            chunk_count = 0,
+            progress_count = 0,
+            size_count = 0
+        const chunkSize = 1024 * 1024 * 5 // 5M
+        const threadCount =  navigator.hardwareConcurrency || 4
+
+        const uploadArr = []
+
+        const uploadChunkFile = (file) => {
+            timestamp = new Date()
+            return new Promise((resolve) => {
+                // 总切片数
+                const chunkCount = Math.ceil(file.size / chunkSize)
+                // 每个线程需要处理的切片数
+                const threadChunkCount = Math.ceil(chunkCount / threadCount)
+                const result = []
+                let curChunkCount = 0
+                for (let i = 0; i < threadCount; i++) {
+                    const worker = new Worker('./worker.js', {
+                        type: 'module',
+                    })
+                    let start = i * threadChunkCount
+                    let end = (i + 1) * threadChunkCount
+                    if (end > chunkCount) {
+                        end = chunkCount
+                    }
+                    worker.onmessage = (e) => {
+                        console.log('onmessage', curChunkCount, e.data)
+                        result[i] = e.data
+                        worker.terminate()
+                        curChunkCount += e.data.length
+                        if(curChunkCount === chunkCount) {
+                            const resFlat = result.flat()
+                            const resSort = resFlat.sort((pre, cur) => pre.index - cur.index)
+                            console.log('result', result, resFlat, resSort)
+                            resolve(resSort)
+                        }
+                    }
+                    worker.onerror = (err) => {
+                        worker.terminate()
+                    }
+                    worker.postMessage({
+                        file,
+                        start,
+                        end,
+                        chunkSize,
+                    })
+                }
+            })
+        }
+
+        const request = (url, method, data) => {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest()
+                xhr.open(method, url)
+                xhr.setRequestHeader('Accept', 'application/json, text/plain, */*')
+                xhr.onreadystatechange = () => {
+                    if (xhr.readyState === 4 && xhr.status === 200) {
+                        progress_count++
+                        // console.log('progress percent: ', progress_count, chunk_count, progress_count / chunk_count * 100, '%')
+                        resolve(xhr.response)
+                    } else {
+                        reject(xhr.response)
+                    }
+                }
+                xhr.send(data)
+            })
+        }
+        const createUpload = (chunkFile, file) => {
+            size_count += chunkFile.blob.size
+            console.log('chunkFile', chunkFile, size_count)
+
+            const formData = new FormData()
+            formData.append('name', file.name)
+            formData.append('uid', chunkFile.hash)
+            formData.append('timestamp', timestamp)
+            formData.append('file', chunkFile.blob)
+            formData.append('chunk', chunkFile.index)
+            formData.append('count', chunk_count)
+
+            return request('http://localhost:9000/chunkUpload', 'POST', formData)
+        }
+    </script>
+</body>
+</html>
